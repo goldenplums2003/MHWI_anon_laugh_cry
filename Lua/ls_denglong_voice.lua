@@ -14,9 +14,10 @@ local CONFIG = {
     verbose = false,   -- true = 每次动作切换、每笔伤害都写进 logs/LuaEngine.log
     collect = false,   -- true = 记录从居合姿态出来的、未登记的动作（找新招式 ID 时用）
 
-    -- 动作窗口关掉后，还要再等多少个 on_time 周期才下"失败"的结论。
-    -- 伤害计数器滞后于实际命中，而登龙之后立刻纳刀会掐掉后摇、让动作窗口提前关闭 ——
+    -- 后摇被掐断时，动作窗口关掉后还要再等多少个 on_time 周期才下"失败"的结论。
+    -- 伤害计数器滞后于实际命中，而登龙之后立刻纳刀会中止后摇、让窗口提前关闭 ——
     -- 这时伤害往往还没记上账，不等就会把打中的判成落空。
+    -- 只在从 CANCEL_EXIT 里的动作退出时才启用，正常打完后摇的情况立刻判、不等。
     -- 大约 60 周期/秒，20 ≈ 0.33 秒。还误判就加大；觉得失败音来得慢就减小。
     graceTicks = 20,
 }
@@ -55,6 +56,13 @@ local MOVES = {
 -- 各种居合都从这两个状态出来。注意别把 49460 加进来 —— 它是通用待机，
 -- 从它出来的动作五花八门，只会刷屏。
 local WATCH_FROM = { [49458] = true, [49459] = true }
+
+-- 会掐掉后摇、让动作窗口提前关闭的退出动作。只有从这些动作退出时才启用宽限期；
+-- 其他情况后摇完整走完，伤害该到早到了，立刻判定，免得失败音白等。
+--   49458 特殊纳刀 —— 登龙之后立刻纳刀会中止后摇，这是本项的由来
+--   49459 居合构え —— 万一转移直接跳到姿态
+-- 如果发现别的取消路线（比如翻滚）也会误判，把那个退出动作的 ID 加进来。
+local CANCEL_EXIT = { [49458] = true, [49459] = true }
 
 local QUEST_BASE  = 0x14500ED30
 local DMG_OFFSET  = 0x17088
@@ -111,7 +119,19 @@ local function loadAll()
     end
 end
 
--- 出结果：记日志 + 屏幕提示 + 放音。why 说明是提前判出来的还是等到动作结束才判的。
+-- 按招式配置的方式给出成败。练气读不到时一律回落到只看伤害。
+local function verdict(mv, st, aura)
+    local auraReadable = (aura >= 0 and st.aura >= 0)
+    local auraKept     = auraReadable and (aura >= st.aura)
+    if mv.judge == 'aura' and auraReadable then
+        return auraKept
+    elseif mv.judge == 'both' and auraReadable then
+        return st.hit and auraKept          -- 不掉刃 且 打出伤害
+    end
+    return st.hit
+end
+
+-- 出结果：记日志 + 屏幕提示 + 放音。why 说明是怎么判出来的。
 local function announce(mv, ok, why, st, dmg, aura, nextLmt)
     Console_Info('[太刀] ' .. mv.label .. (ok and ' 成功' or ' 失败')
         .. '   [' .. (mv.judge or 'damage') .. '/' .. why .. ']'
@@ -204,10 +224,13 @@ function on_time()
                     .. '   伤害 ' .. st.dmg .. '->' .. dmg
                     .. '   练气 ' .. st.aura .. '->' .. aura
                     .. '   下一动作=' .. lmt)
-            else
-                -- 还没判出结果：进宽限期继续等伤害入账，别急着下失败的结论
+            elseif CANCEL_EXIT[lmt] then
+                -- 后摇被掐断，窗口提前关了：进宽限期继续等伤害入账
                 st.pending = true
                 st.grace = CONFIG.graceTicks
+            else
+                -- 后摇完整走完，伤害该到早到了，直接判，失败音不用等
+                announce(mv, verdict(mv, st, aura), '结束', st, dmg, aura, lmt)
             end
         end
 
@@ -219,18 +242,7 @@ function on_time()
                 st.grace = st.grace - 1
                 if st.grace <= 0 then
                     st.pending = false
-                    local auraReadable = (aura >= 0 and st.aura >= 0)
-                    local auraKept     = auraReadable and (aura >= st.aura)
-
-                    local ok
-                    if mv.judge == 'aura' and auraReadable then
-                        ok = auraKept
-                    elseif mv.judge == 'both' and auraReadable then
-                        ok = st.hit and auraKept      -- 不掉刃 且 打出伤害
-                    else
-                        ok = st.hit                   -- 练气读不到时也走这条
-                    end
-                    announce(mv, ok, '宽限后', st, dmg, aura, st.endLmt)
+                    announce(mv, verdict(mv, st, aura), '宽限后', st, dmg, aura, st.endLmt)
                 end
             end
         end
