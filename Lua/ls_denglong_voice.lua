@@ -13,6 +13,12 @@ local CONFIG = {
     hud     = false,   -- 屏幕提示命中/落空。Ctrl+D 开关
     verbose = false,   -- true = 每次动作切换、每笔伤害都写进 logs/LuaEngine.log
     collect = false,   -- true = 记录从居合姿态出来的、未登记的动作（找新招式 ID 时用）
+
+    -- 动作窗口关掉后，还要再等多少个 on_time 周期才下"失败"的结论。
+    -- 伤害计数器滞后于实际命中，而登龙之后立刻纳刀会掐掉后摇、让动作窗口提前关闭 ——
+    -- 这时伤害往往还没记上账，不等就会把打中的判成落空。
+    -- 大约 60 周期/秒，20 ≈ 0.33 秒。还误判就加大；觉得失败音来得慢就减小。
+    graceTicks = 20,
 }
 
 local WEAPON_LS = 3    -- 武器种类：太刀
@@ -146,20 +152,28 @@ function on_time()
     for i, mv in ipairs(MOVES) do
         local st = tracking[i]
         if st == nil then
-            st = { active = false, dmg = 0, hp = 0, aura = 0, hit = false }
+            st = { active = false, pending = false, grace = 0, endLmt = 0,
+                   dmg = 0, hp = 0, aura = 0, hit = false, played = false }
             tracking[i] = st
         end
 
-        if mv.mains[lmt] and not st.active then
-            if not CONFIG.onlyRed or aura == 3 then
+        if mv.mains[lmt] then
+            if st.pending then
+                -- 宽限期内又回到本招式，算同一次的延续，不重置基准
+                st.pending = false
                 st.active = true
-                st.hit = false
-                st.played = false
-                st.dmg, st.hp, st.aura = dmg, hp, aura
+            elseif not st.active then
+                if not CONFIG.onlyRed or aura == 3 then
+                    st.active = true
+                    st.hit = false
+                    st.played = false
+                    st.dmg, st.hp, st.aura = dmg, hp, aura
+                end
             end
         end
 
-        if st.active then
+        -- 动作窗口内、以及窗口关闭后的宽限期内，都继续盯伤害
+        if st.active or st.pending then
             -- 伤害涨了、或怪掉血了，锁定"打中了"
             if dmg > st.dmg then st.hit = true end
             if hp >= 0 and st.hp >= 0 and hp < st.hp then st.hit = true end
@@ -180,9 +194,10 @@ function on_time()
             end
         end
 
-        -- 动作结束。提前出过声的就只补一条日志，不重复放音。
+        -- 动作窗口关闭
         if st.active and not mv.mains[lmt] and not mv.follow[lmt] then
             st.active = false
+            st.endLmt = lmt
 
             if st.played then
                 Console_Info('[太刀] ' .. mv.label .. ' 动作结束（已提前出声）'
@@ -190,18 +205,33 @@ function on_time()
                     .. '   练气 ' .. st.aura .. '->' .. aura
                     .. '   下一动作=' .. lmt)
             else
-                local auraReadable = (aura >= 0 and st.aura >= 0)
-                local auraKept     = auraReadable and (aura >= st.aura)
+                -- 还没判出结果：进宽限期继续等伤害入账，别急着下失败的结论
+                st.pending = true
+                st.grace = CONFIG.graceTicks
+            end
+        end
 
-                local ok
-                if mv.judge == 'aura' and auraReadable then
-                    ok = auraKept
-                elseif mv.judge == 'both' and auraReadable then
-                    ok = st.hit and auraKept      -- 不掉刃 且 打出伤害
-                else
-                    ok = st.hit                   -- 练气读不到时也走这条
+        -- 宽限期倒计时，走完还没等到伤害才算失败
+        if st.pending then
+            if st.played then
+                st.pending = false
+            else
+                st.grace = st.grace - 1
+                if st.grace <= 0 then
+                    st.pending = false
+                    local auraReadable = (aura >= 0 and st.aura >= 0)
+                    local auraKept     = auraReadable and (aura >= st.aura)
+
+                    local ok
+                    if mv.judge == 'aura' and auraReadable then
+                        ok = auraKept
+                    elseif mv.judge == 'both' and auraReadable then
+                        ok = st.hit and auraKept      -- 不掉刃 且 打出伤害
+                    else
+                        ok = st.hit                   -- 练气读不到时也走这条
+                    end
+                    announce(mv, ok, '宽限后', st, dmg, aura, st.endLmt)
                 end
-                announce(mv, ok, '结束', st, dmg, aura, lmt)
             end
         end
     end
