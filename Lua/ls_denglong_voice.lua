@@ -18,8 +18,11 @@ local CONFIG = {
     -- 伤害计数器滞后于实际命中，而登龙之后立刻纳刀会中止后摇、让窗口提前关闭 ——
     -- 这时伤害往往还没记上账，不等就会把打中的判成落空。
     -- 只在从 CANCEL_EXIT 里的动作退出时才启用，正常打完后摇的情况立刻判、不等。
-    -- 大约 60 周期/秒，20 ≈ 0.33 秒。还误判就加大；觉得失败音来得慢就减小。
-    graceTicks = 20,
+    -- 大约 60 周期/秒，45 ≈ 0.75 秒。
+    -- 取这么大是因为实测发现被掐断的窗口关得极早：日志里几次误判的落空都是
+    -- "练气 3->3"，也就是连登龙必扣的那一级练气都还没扣掉，说明剩下要等的时间不短。
+    -- 日志会记下实际消耗了多少周期（"宽限N周期"），按那个数字往下调最准。
+    graceTicks = 45,
 }
 
 local WEAPON_LS = 3    -- 武器种类：太刀
@@ -237,12 +240,16 @@ function on_time()
         -- 宽限期倒计时，走完还没等到伤害才算失败
         if st.pending then
             if st.played then
+                -- 宽限期内等到了伤害，已经出过声。记一下等了多久，方便调 graceTicks
                 st.pending = false
+                Console_Info('[太刀] ' .. mv.label .. ' 宽限期内等到伤害（等了 '
+                    .. (CONFIG.graceTicks - st.grace) .. ' 周期）')
             else
                 st.grace = st.grace - 1
                 if st.grace <= 0 then
                     st.pending = false
-                    announce(mv, verdict(mv, st, aura), '宽限后', st, dmg, aura, st.endLmt)
+                    announce(mv, verdict(mv, st, aura),
+                        '宽限' .. CONFIG.graceTicks .. '周期用尽', st, dmg, aura, st.endLmt)
                 end
             end
         end
